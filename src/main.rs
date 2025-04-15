@@ -43,15 +43,11 @@ impl Parser {
     fn parse_to_docx(&self) -> Docx {
         let mut docx = Docx::new();
 
-        // Setup parser options
-        let options = Options::empty();
-        let parser = MarkdownParser::new_ext(&self.content, options);
-
-        // Add title if available
+        // Add title and author from metadata if available
         if let Some(metadata) = &self.metadata {
             if let Some(title) = &metadata.title {
                 let mut run = Run::new().add_text(title).size(40);
-                if title.len() > 0 {
+                if !title.is_empty() {
                     run = run.bold();
                 }
                 let title_paragraph = Paragraph::new().add_run(run);
@@ -68,132 +64,249 @@ impl Parser {
             docx = docx.add_paragraph(Paragraph::new());
         }
 
-        // Parse markdown content
-        let mut current_text = String::new();
-        let mut is_bold = false;
-        let mut current_paragraph = Paragraph::new();
-        let mut in_heading = false;
-        let mut current_heading_level = HeadingLevel::H1;
+        // Set up the markdown parser with basic options
+        let options = Options::empty();
+        let parser = MarkdownParser::new_ext(&self.content, options);
 
+        // State tracking
+        let mut current_heading_level = HeadingLevel::H1;
+        let mut is_bold = false;
+        let mut paragraph = Paragraph::new();
+        let mut current_text = String::new();
+
+        // Process each event in the markdown
         for event in parser {
             match event {
+                // Headers
                 Event::Start(Tag::Heading { level, .. }) => {
-                    // Start a new heading
-                    in_heading = true;
+                    // Start a new heading paragraph
+                    if !current_text.is_empty() {
+                        let text = current_text.clone();
+                        paragraph = paragraph.add_run(Run::new().add_text(text));
+                        docx = docx.add_paragraph(paragraph);
+                        current_text.clear();
+                    }
+
                     current_heading_level = level;
-                    current_paragraph = Paragraph::new();
+                    paragraph = Paragraph::new();
                 }
-                Event::End(TagEnd::Heading(_)) => {
-                    // End of heading - add text with heading formatting
-                    if !current_text.is_empty() {
-                        let size = match current_heading_level {
-                            HeadingLevel::H1 => 36,
-                            HeadingLevel::H2 => 28,
-                            HeadingLevel::H3 => 24,
-                            _ => 20,
-                        };
 
-                        // Apply heading formatting
-                        let mut run = Run::new().add_text(&current_text).size(size);
-
-                        // Make headings bold
-                        run = run.bold();
-
-                        current_paragraph = current_paragraph.add_run(run);
-                        docx = docx.add_paragraph(current_paragraph);
-
-                        // Reset
-                        current_text.clear();
-                        current_paragraph = Paragraph::new();
-                        in_heading = false;
-                    }
-                }
+                // Paragraphs
                 Event::Start(Tag::Paragraph) => {
-                    // Start new paragraph
-                    current_paragraph = Paragraph::new();
-                }
-                Event::End(TagEnd::Paragraph) => {
-                    // Add paragraph if not empty
+                    // Start a new paragraph
                     if !current_text.is_empty() {
-                        let mut run = Run::new().add_text(&current_text);
-                        if is_bold {
-                            run = run.bold();
-                        }
-                        current_paragraph = current_paragraph.add_run(run);
+                        let text = current_text.clone();
+                        paragraph = paragraph.add_run(Run::new().add_text(text));
+                        docx = docx.add_paragraph(paragraph);
                         current_text.clear();
                     }
 
-                    // Add paragraph to document
-                    docx = docx.add_paragraph(current_paragraph);
-                    current_paragraph = Paragraph::new();
-                    is_bold = false;
+                    paragraph = Paragraph::new();
                 }
+
+                // Bold text
                 Event::Start(Tag::Strong) => {
-                    // Add any current text as normal text
+                    // If we have accumulated non-bold text, add it first
                     if !current_text.is_empty() {
-                        current_paragraph =
-                            current_paragraph.add_run(Run::new().add_text(&current_text));
+                        let text = current_text.clone();
+                        paragraph = paragraph.add_run(Run::new().add_text(text));
                         current_text.clear();
                     }
                     is_bold = true;
                 }
-                Event::End(TagEnd::Strong) => {
-                    // Add bold text
-                    if !current_text.is_empty() {
-                        current_paragraph =
-                            current_paragraph.add_run(Run::new().add_text(&current_text).bold());
-                        current_text.clear();
+
+                // End tags
+                Event::End(tag) => {
+                    match tag {
+                        TagEnd::Heading(_) => {
+                            // Add the heading text with proper formatting
+                            if !current_text.is_empty() {
+                                let size = match current_heading_level {
+                                    HeadingLevel::H1 => 36,
+                                    HeadingLevel::H2 => 28,
+                                    HeadingLevel::H3 => 24,
+                                    _ => 20,
+                                };
+
+                                let text = current_text.clone();
+                                paragraph =
+                                    paragraph.add_run(Run::new().add_text(text).size(size).bold());
+                                docx = docx.add_paragraph(paragraph);
+
+                                current_text.clear();
+                                paragraph = Paragraph::new();
+                            }
+                        }
+
+                        TagEnd::Paragraph => {
+                            // Add any remaining text in the paragraph
+                            if !current_text.is_empty() {
+                                let text = current_text.clone();
+                                let mut run = Run::new().add_text(text);
+
+                                if is_bold {
+                                    run = run.bold();
+                                }
+
+                                paragraph = paragraph.add_run(run);
+                                docx = docx.add_paragraph(paragraph);
+
+                                current_text.clear();
+                            } else if !paragraph.children.is_empty() {
+                                docx = docx.add_paragraph(paragraph);
+                            }
+
+                            is_bold = false;
+                            paragraph = Paragraph::new();
+                        }
+
+                        TagEnd::Strong => {
+                            // End of bold text - add it with bold formatting
+                            if !current_text.is_empty() {
+                                let text = current_text.clone();
+                                paragraph = paragraph.add_run(Run::new().add_text(text).bold());
+                                current_text.clear();
+                            }
+                            is_bold = false;
+                        }
+
+                        _ => {}
                     }
-                    is_bold = false;
                 }
+
+                // Text content
                 Event::Text(text) => {
                     current_text.push_str(&text);
                 }
+
+                // Soft breaks (newlines)
+                Event::SoftBreak => {
+                    current_text.push(' ');
+                }
+
+                // Hard breaks (new paragraphs)
+                Event::HardBreak => {
+                    if !current_text.is_empty() {
+                        let text = current_text.clone();
+                        let mut run = Run::new().add_text(text);
+
+                        if is_bold {
+                            run = run.bold();
+                        }
+
+                        paragraph = paragraph.add_run(run);
+                        docx = docx.add_paragraph(paragraph);
+
+                        current_text.clear();
+                    }
+
+                    paragraph = Paragraph::new();
+                }
+
+                // Ignore other events
                 _ => {}
             }
         }
 
-        // Handle any remaining text
+        // Add any final content
         if !current_text.is_empty() {
-            let mut run = Run::new().add_text(&current_text);
+            let text = current_text.clone();
+            let mut run = Run::new().add_text(text);
+
             if is_bold {
                 run = run.bold();
             }
-            if in_heading {
-                let size = match current_heading_level {
-                    HeadingLevel::H1 => 36,
-                    HeadingLevel::H2 => 28,
-                    HeadingLevel::H3 => 24,
-                    _ => 20,
-                };
-                run = run.size(size);
-            }
 
-            current_paragraph = current_paragraph.add_run(run);
-            docx = docx.add_paragraph(current_paragraph);
+            paragraph = paragraph.add_run(run);
+            docx = docx.add_paragraph(paragraph);
         }
 
         docx
     }
 }
 
-fn main() -> Result<(), DocxError> {
-    // Load from constant example for now
-    let parser = Parser::new(SIMPLE_MARKDOWN_YFM);
+use clap::Parser as ClapParser;
+use std::fs;
+use std::path::PathBuf;
 
-    if let Some(metadata) = &parser.metadata {
-        assert_eq!(metadata.author.as_ref().unwrap(), "Nathan Bleier");
-        assert_eq!(metadata.title.as_ref().unwrap(), "A Simple Proposal");
-    }
+/// A tool to convert Markdown to DOCX files
+#[derive(ClapParser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Input markdown file
+    #[arg(value_name = "INPUT")]
+    input: Option<PathBuf>,
+
+    /// Output DOCX file (defaults to input filename with .docx extension)
+    #[arg(short, long, value_name = "FILE")]
+    output: Option<PathBuf>,
+
+    /// Use sample markdown content for testing
+    #[arg(short, long)]
+    sample: bool,
+}
+
+fn main() -> Result<(), DocxError> {
+    let cli = Cli::parse();
+
+    // Determine the markdown content to use
+    let markdown_content = if let Some(input_path) = &cli.input {
+        // Read from specified input file
+        match fs::read_to_string(input_path) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("Error reading file {}: {}", input_path.display(), e);
+                return Ok(());
+            }
+        }
+    } else if cli.sample {
+        // Use the sample content for testing
+        println!("Using sample content.");
+        SIMPLE_MARKDOWN_YFM.to_string()
+    } else {
+        // No input file or sample flag, print usage
+        eprintln!("Error: No input file specified. Use --sample to use sample content.");
+        return Ok(());
+    };
+
+    // Create the parser with the markdown content
+    let parser = Parser::new(&markdown_content);
+
+    // Determine the output filename
+    let output_path = if let Some(output) = cli.output {
+        output
+    } else if let Some(input) = cli.input {
+        // Derive output path from input path by changing extension
+        let mut output = input.clone();
+        output.set_extension("docx");
+        output
+    } else {
+        // Default output path for sample content
+        PathBuf::from("output.docx")
+    };
 
     // Create the DOCX file
-    let path = std::path::Path::new("./hello.docx");
-    let file = std::fs::File::create(path).unwrap();
+    let file = match fs::File::create(&output_path) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("Error creating file {}: {}", output_path.display(), e);
+            return Ok(());
+        }
+    };
 
     // Parse markdown and generate DOCX
     let docx = parser.parse_to_docx();
-    docx.build().pack(file)?;
-
-    println!("Successfully created DOCX file at: {}", path.display());
-    Ok(())
+    match docx.build().pack(file) {
+        Ok(_) => {
+            println!(
+                "Successfully created DOCX file at: {}",
+                output_path.display()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Error creating DOCX file: {}", e);
+            Ok(()) // Return Ok to avoid double error messages
+        }
+    }
 }
