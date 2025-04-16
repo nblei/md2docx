@@ -50,6 +50,23 @@ md2docx --help
 - Images with scale control
 - YAML front matter (title and author)
 
+## Images
+
+Images can be customized by inserting JSON into the `alt` field.  Currently, `md2docx` supports:
+
+1. `scale: float` --- Image size scaling
+2. `ref: string` --- Image label
+
+An image label can be referenced in text using the `ref` keyword inside curly brackets:
+
+Images can also be captioned.
+
+```
+![{"scale": 0.5, "ref": "a-scaled-image"}][url "Figure Caption"]
+
+{ref: a-scaled-image} is scaled to 50% of its true size.
+```
+
 ## License
 
-MIT
+GPLv3
