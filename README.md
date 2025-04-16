@@ -48,7 +48,8 @@ md2docx --help
 - Bold text
 - Line breaks
 - Images with scale control
-- YAML front matter (title and author)
+- YAML front matter (title, author, and affiliation)
+
 
 ## Images
 
@@ -66,6 +67,16 @@ Images can also be captioned.
 
 {ref: a-scaled-image} is scaled to 50% of its true size.
 ```
+
+## YAML Front Matter
+
+The YAML Front Matter supports several fields.
+
+1. `title` is the title of the document/paper.
+2. `author` is the name of the author.
+3. `affiliation` is the author's affiliation.
+
+Currently, only single authors are supported.
 
 ## License
 
