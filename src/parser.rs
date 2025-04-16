@@ -1,149 +1,17 @@
 use anyhow::Result;
-use bimap::BiMap;
 use docx_rs::*;
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, trace, warn};
 use markdown::mdast::{Heading, Node};
 use markdown::to_mdast;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::Deserialize;
-use std::path::PathBuf;
-use yaml_front_matter::YamlFrontMatter;
+use std::collections::HashMap;
 
+use crate::image_reference_collector::{ImageModifiers, ImageReferenceCollector};
 use crate::traverser::MarkdownNodeTraverser;
 
-const PPI: u32 = 220;
-const EMUS_PER_INCH: u32 = 914_400;
-
-static REF_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r#"\{ref:\s*([^}]*)\s*}"#).unwrap());
-fn extract_ref(text: &str) -> Option<&str> {
-    REF_REGEX
-        .captures(text)
-        .and_then(|caps| caps.get(1).map(|m| m.as_str()))
-}
-
-/// Returns the image dimensions in (EMU, EMU)
-fn get_image_dimensions(file_path: &PathBuf) -> Result<(u32, u32)> {
-    let reader = image::io::Reader::open(file_path)?;
-    let (dim1, dim2) = reader.into_dimensions()?;
-    Ok((EMUS_PER_INCH * dim1 / PPI, EMUS_PER_INCH * dim2 / PPI))
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct Metadata {
-    title: Option<String>,
-    author: Option<String>,
-    affiliation: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct ImageModifiers {
-    scale: f64,
-    r#ref: Option<String>,
-}
-
-impl Default for ImageModifiers {
-    fn default() -> Self {
-        Self {
-            scale: 1.,
-            r#ref: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-struct StackCounter {
-    value_: u32,
-}
-
-impl StackCounter {
-    pub fn new() -> Self {
-        StackCounter { value_: 0 }
-    }
-    pub fn push(&mut self) {
-        self.value_ += 1;
-    }
-    pub fn pop(&mut self) {
-        if self.value_ > 0 {
-            self.value_ -= 1;
-        }
-    }
-    pub fn set(&self) -> bool {
-        self.value_ > 0
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ListType {
-    Ordered,
-    Unordered,
-}
-
-impl From<StackCounter> for bool {
-    fn from(value: StackCounter) -> Self {
-        value.set()
-    }
-}
-
-impl Default for StackCounter {
-    fn default() -> Self {
-        StackCounter::new()
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct ImageReferenceCollector {
-    image_figure_count: usize,
-    image_references: BiMap<String, usize>,
-}
-
-impl ImageReferenceCollector {
-    pub fn new() -> Self {
-        Self {
-            image_figure_count: 0,
-            image_references: BiMap::new(),
-        }
-    }
-
-    pub fn get_references(&self) -> &BiMap<String, usize> {
-        &self.image_references
-    }
-}
-
-impl MarkdownNodeTraverser for ImageReferenceCollector {
-    type Output = ();
-
-    // We don't need to do anything special with the result in process_child
-    fn process_child(&mut self, node: &Node, _result: &mut Self::Output) {
-        self.process_node(node);
-    }
-
-    // Override only the image visit method to collect references
-    fn visit_image(&mut self, image: &markdown::mdast::Image) -> Self::Output {
-        debug!(
-            "First pass - collecting image reference: url={}, alt={}",
-            image.url, image.alt
-        );
-
-        // Check if the image has a reference ID in its alt text
-        let res: ImageModifiers =
-            serde_json::from_str(&image.alt).unwrap_or(ImageModifiers::default());
-
-        if let Some(reference) = res.r#ref {
-            self.image_figure_count += 1;
-            let figure_number = self.image_figure_count;
-
-            if self.image_references.contains_left(&reference) {
-                error!("Multiple defined reference: {}", reference);
-            } else {
-                info!("Adding image reference: {} -> {}", reference, figure_number);
-                self.image_references.insert(reference, figure_number);
-            }
-        }
-
-        ()
-    }
-}
+pub const PPI: u32 = 220;
+pub const EMUS_PER_INCH: u32 = 914_400;
 
 #[derive(Default, Debug, Clone)]
 pub struct Parser {
@@ -153,268 +21,10 @@ pub struct Parser {
     strong_state: StackCounter,
     em_state: StackCounter,
     list_type: Vec<ListType>,
-    image_references: BiMap<String, usize>,
+    image_references: HashMap<String, usize>,
 }
 
 impl Parser {
-    pub fn new(filedata: &str, base_path: Option<PathBuf>) -> Self {
-        match YamlFrontMatter::parse::<Metadata>(filedata) {
-            Ok(document) => Parser {
-                metadata: Some(document.metadata),
-                content: document.content,
-                base_path,
-                ..Default::default()
-            },
-            Err(_) => Parser {
-                metadata: None,
-                content: String::from(filedata),
-                base_path,
-                ..Default::default()
-            },
-        }
-    }
-
-    // Handle document metadata (title, author)
-    fn add_document_metadata(&self, mut docx: Docx) -> Docx {
-        // Add title and author from metadata if available
-        if let Some(metadata) = &self.metadata {
-            if let Some(title) = &metadata.title {
-                let mut run = Run::new().add_text(title).size(40);
-                if !title.is_empty() {
-                    run = run.bold();
-                }
-                // Create paragraph with center justification
-                let title_paragraph = docx_rs::Paragraph::new()
-                    .add_run(run)
-                    .align(AlignmentType::Center);
-                docx = docx.add_paragraph(title_paragraph);
-            }
-
-            if let Some(author) = &metadata.author {
-                let author_paragraph = docx_rs::Paragraph::new()
-                    .add_run(Run::new().add_text(author).size(24).italic())
-                    .align(AlignmentType::Center);
-                docx = docx.add_paragraph(author_paragraph);
-                if let Some(affiliation) = &metadata.affiliation {
-                    let affiliation_paragraph = docx_rs::Paragraph::new()
-                        .add_run(Run::new().add_text(affiliation).size(24).italic())
-                        .align(AlignmentType::Center);
-                    docx = docx.add_paragraph(affiliation_paragraph);
-                }
-            }
-
-            // Add a blank line after metadata
-            docx = docx.add_paragraph(docx_rs::Paragraph::new());
-        }
-
-        docx
-    }
-
-    // Handle insertion of images and return the updated docx
-    fn handle_image(
-        &mut self,
-        docx: Docx,
-        url: &str,
-        alt: &str,
-        title: Option<&str>,
-        figure_number: usize,
-    ) -> Docx {
-        let img_url = url.to_string();
-        let mut docx = docx;
-
-        // Try to resolve the image path
-        if let Some(base_dir) = &self.base_path {
-            let img_path = base_dir.join(&img_url);
-            debug!("Resolving image path: {}", img_path.display());
-
-            // Check if image exists
-            if img_path.exists() {
-                debug!("Image file found at: {}", img_path.display());
-                // Try to read the image file
-                match std::fs::read(&img_path) {
-                    Ok(buffer) => {
-                        let res: ImageModifiers =
-                            serde_json::from_str(alt).unwrap_or(ImageModifiers::default());
-                        debug!("Successfully read image file ({} bytes)", buffer.len());
-                        let (dim1, dim2) = get_image_dimensions(&img_path).unwrap();
-                        let (dim1, dim2) = (
-                            (dim1 as f64 * res.scale) as u32,
-                            (dim2 as f64 * res.scale) as u32,
-                        );
-
-                        // Reference handling is now done in the first pass
-                        if let Some(reference) = res.r#ref {
-                            debug!("Using reference: {} -> {}", reference, figure_number);
-                        } else {
-                            debug!("Image has no reference");
-                        }
-
-                        // Create a Pic object from the image data
-                        // Use a standard image size (5 inches width max)
-                        let pic = Pic::new(&buffer).size(dim1, dim2);
-
-                        // Create a new paragraph with centered alignment
-                        let img_paragraph = docx_rs::Paragraph::new()
-                            .add_run(Run::new().add_image(pic))
-                            .align(AlignmentType::Center);
-
-                        // Add the image paragraph to the document
-                        docx = docx.add_paragraph(img_paragraph);
-
-                        // Create a caption text with figure number
-                        let display_title = title.unwrap_or(alt);
-                        let caption_text = if !display_title.is_empty() {
-                            format!("Figure {}: {}", figure_number, display_title)
-                        } else {
-                            format!("Figure {}", figure_number)
-                        };
-
-                        // Add a centered caption below the image
-                        let caption_paragraph = docx_rs::Paragraph::new()
-                            .add_run(Run::new().add_text(caption_text).italic())
-                            .align(AlignmentType::Center);
-
-                        docx = docx.add_paragraph(caption_paragraph);
-                    }
-                    Err(e) => {
-                        // If image couldn't be read, add placeholder text
-                        warn!("Failed to read image file: {}", e);
-                        let placeholder =
-                            format!("[Image: {} (could not read file)]", img_path.display());
-                        let placeholder_paragraph = docx_rs::Paragraph::new()
-                            .add_run(Run::new().add_text(placeholder).italic())
-                            .align(AlignmentType::Center);
-                        docx = docx.add_paragraph(placeholder_paragraph);
-                    }
-                }
-            } else {
-                // If image doesn't exist, use placeholder text
-                warn!("Image file not found: {}", img_path.display());
-                let placeholder = format!("[Image: {} (not found)]", img_url);
-                let placeholder_paragraph = docx_rs::Paragraph::new()
-                    .add_run(Run::new().add_text(placeholder).italic())
-                    .align(AlignmentType::Center);
-                docx = docx.add_paragraph(placeholder_paragraph);
-            }
-        } else {
-            // No base path available, use placeholder text
-            warn!("No base path available to resolve image: {}", img_url);
-            let placeholder = format!("[Image: {}]", img_url);
-            let placeholder_paragraph = docx_rs::Paragraph::new()
-                .add_run(Run::new().add_text(placeholder).italic())
-                .align(AlignmentType::Center);
-            docx = docx.add_paragraph(placeholder_paragraph);
-        }
-
-        docx
-    }
-
-    // Format text with bold if needed
-    fn format_text(&self, text: &str) -> Run {
-        let mut run = Run::new().add_text(text);
-        if self.strong_state.into() {
-            run = run.bold();
-        }
-        if self.em_state.into() {
-            run = run.italic();
-        }
-        run
-    }
-
-    // Add a formatted heading and return the updated docx
-    fn add_heading(&self, docx: Docx, text: &str, level: u8) -> Docx {
-        let size = match level {
-            1 => 36,
-            2 => 28,
-            3 => 24,
-            _ => 20,
-        };
-
-        let heading_paragraph =
-            docx_rs::Paragraph::new().add_run(Run::new().add_text(text).size(size).bold());
-
-        docx.add_paragraph(heading_paragraph)
-    }
-
-    // Initialize numbering for lists based on the docx-rs API
-    fn initialize_numbering(&self, docx: Docx) -> Docx {
-        // Create bullet list (ID: 1)
-        let docx = docx.add_abstract_numbering(
-            AbstractNumbering::new(1)
-                .add_level(
-                    Level::new(
-                        0,
-                        Start::new(1),
-                        NumberFormat::new("bullet"),
-                        LevelText::new("•"),
-                        LevelJc::new("left"),
-                    )
-                    .indent(
-                        Some(720),
-                        Some(SpecialIndentType::Hanging(360)),
-                        None,
-                        None,
-                    ),
-                )
-                .add_level(
-                    Level::new(
-                        1,
-                        Start::new(1),
-                        NumberFormat::new("bullet"),
-                        LevelText::new("○"),
-                        LevelJc::new("left"),
-                    )
-                    .indent(
-                        Some(1440),
-                        Some(SpecialIndentType::Hanging(360)),
-                        None,
-                        None,
-                    ),
-                ),
-        );
-
-        // Create numbered list (ID: 2)
-        let docx = docx.add_abstract_numbering(
-            AbstractNumbering::new(2)
-                .add_level(
-                    Level::new(
-                        0,
-                        Start::new(1),
-                        NumberFormat::new("decimal"),
-                        LevelText::new("%1."),
-                        LevelJc::new("left"),
-                    )
-                    .indent(
-                        Some(720),
-                        Some(SpecialIndentType::Hanging(360)),
-                        None,
-                        None,
-                    ),
-                )
-                .add_level(
-                    Level::new(
-                        1,
-                        Start::new(1),
-                        NumberFormat::new("lowerLetter"),
-                        LevelText::new("%2)"),
-                        LevelJc::new("left"),
-                    )
-                    .indent(
-                        Some(1440),
-                        Some(SpecialIndentType::Hanging(360)),
-                        None,
-                        None,
-                    ),
-                ),
-        );
-
-        // Associate abstract numberings with concrete numberings
-        let docx = docx.add_numbering(Numbering::new(1, 1)); // Bullet list
-        let docx = docx.add_numbering(Numbering::new(2, 2)); // Numbered list
-
-        docx
-    }
-
     // Main function to parse markdown and create a DOCX document
     pub fn parse_to_docx(&mut self) -> Docx {
         let mut docx = Docx::new();
@@ -435,7 +45,7 @@ impl Parser {
             // Multi-pass parsing
             // Pass 1: Collect image references
             let mut reference_collector = ImageReferenceCollector::new();
-            reference_collector.process_node(&ast);
+            reference_collector.process_node(&ast, ());
 
             // Transfer collected references to our parser
             self.image_references = reference_collector.get_references().clone();
@@ -463,7 +73,7 @@ impl Parser {
             let reference_text = reference_match.as_str();
 
             if let Some(reference_key) = extract_ref(reference_text) {
-                if let Some(figure_number) = self.image_references.get_by_left(reference_key) {
+                if let Some(figure_number) = self.image_references.get(reference_key) {
                     // Replace the {ref:key} with "Figure X"
                     debug!(
                         "Replacing reference '{}' with 'Figure {}'",
@@ -490,7 +100,6 @@ impl Parser {
             // No references found, return the original text
             return String::from(text);
         }
-
         result
     }
 
@@ -525,7 +134,7 @@ impl Parser {
 
                 let figure_number = if let Some(reference) = &res.r#ref {
                     // Use the figure number from the first pass
-                    *self.image_references.get_by_left(reference).unwrap_or(&0)
+                    *self.image_references.get(reference).unwrap_or(&0)
                 } else {
                     // For images without references, use the position in the document
                     let pos = self.image_references.len() + 1;
@@ -600,10 +209,23 @@ impl Parser {
             Node::Code(_) => todo!(),
             Node::Math(_) => todo!(),
             Node::MdxFlowExpression(_) => todo!(),
-            Node::Table(_) => todo!(),
+            Node::Table(table) => {
+                for child in table.children.iter() {
+                    docx = self.process_node(docx, child);
+                }
+                docx
+            }
             Node::ThematicBreak(_) => todo!(),
-            Node::TableRow(_) => todo!(),
-            Node::TableCell(_) => todo!(),
+            Node::TableRow(table_row) => {
+                for child in table_row.children.iter() {
+                    docx = self.process_node(docx, child);
+                }
+                docx
+            }
+            Node::TableCell(table_cell) => {
+                todo!();
+                docx
+            }
             Node::ListItem(list_item) => {
                 // Log unsupported features
                 if list_item.checked.is_some() {

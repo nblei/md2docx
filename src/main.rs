@@ -2,6 +2,8 @@ use docx_rs::*;
 use log::{error, info};
 use std::path::PathBuf;
 
+mod emitter;
+mod image_reference_collector;
 mod parser;
 mod traverser;
 use parser::Parser;
