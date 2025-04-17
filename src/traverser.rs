@@ -9,7 +9,7 @@ use markdown::mdast::{
 /// A trait for traversing Markdown AST nodes
 pub trait MarkdownNodeTraverser {
     /// The type that will be produced during traversal
-    type Output: Default;
+    type Output;
 
     /// Process a node and return the output
     fn process_node(&mut self, node: &Node, output: Self::Output) -> Self::Output {
