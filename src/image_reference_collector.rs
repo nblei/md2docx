@@ -1,5 +1,4 @@
 use log::{debug, error, info};
-use markdown::mdast::Node;
 use serde::Deserialize;
 
 use crate::traverser::MarkdownNodeTraverser;
@@ -33,13 +32,6 @@ impl Into<HashMap<String, usize>> for ImageReferenceCollector {
 }
 
 impl ImageReferenceCollector {
-    pub fn new() -> Self {
-        Self {
-            image_figure_count: 0,
-            image_references: HashMap::new(),
-        }
-    }
-
     pub fn get_references(&self) -> &HashMap<String, usize> {
         &self.image_references
     }

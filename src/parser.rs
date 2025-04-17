@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use docx_rs::*;
-use log::{debug, error, trace};
+use log::{debug, error, info, trace};
 use markdown::to_mdast;
 use serde::Deserialize;
 use yaml_front_matter::YamlFrontMatter;
@@ -24,7 +24,6 @@ pub struct Metadata {
 pub struct Parser {
     metadata: Option<Metadata>,
     content: String,
-    base_path: Option<std::path::PathBuf>, // For resolving relative paths
     image_reference_collector: ImageReferenceCollector,
     emitter: Emitter,
 }
@@ -35,14 +34,13 @@ impl Parser {
             Ok(document) => Self {
                 metadata: Some(document.metadata),
                 content: document.content,
-                base_path,
+                emitter: Emitter::new(base_path.clone()),
                 ..Default::default()
             },
             Err(_) => Self {
                 metadata: None,
                 content: String::from(filedata),
                 emitter: Emitter::new(base_path.clone()),
-                base_path,
                 ..Default::default()
             },
         }
@@ -52,25 +50,30 @@ impl Parser {
     pub fn parse_to_docx(&mut self) -> Docx {
         let mut docx = Docx::new();
 
-        // Initialize numbering for lists
-        self.emitter
-            .set_image_refernces(self.image_reference_collector.clone().into());
-        docx = self.emitter.initialize_numbering(docx);
-
-        // Add title and author information
-        docx = self.emitter.add_document_metadata(&self.metadata, docx);
-
         debug!("Parsing markdown content");
-        trace!("Content: {}", self.content);
-
-        // Parse markdown to AST
         if let Ok(ast) = to_mdast(&self.content, &markdown::ParseOptions::default()) {
+            // Parse markdown to AST
             debug!("Successfully parsed markdown AST");
+            trace!("Content: {}", self.content);
+
             // Multi-pass parsing
             // Pass 1: Collect image references
+            info!("Pass 1: ImageReferenceCollector");
             self.image_reference_collector.process_node(&ast, ());
+            // Initialize numbering for lists
+            self.emitter
+                .set_image_refernces(self.image_reference_collector.get_references().clone());
+            info!("Image reference collector:");
+            for (key, val) in self.image_reference_collector.get_references().iter() {
+                info!("{} -> {}", key, val);
+            }
+            docx = self.emitter.initialize_numbering(docx);
+
+            // Add title and author information
+            docx = self.emitter.add_document_metadata(&self.metadata, docx);
 
             // Pass 2: Process the AST and generate DOCX with reference resolution
+            info!("Pass 2: Emitter");
             docx = self.emitter.process_node(&ast, docx);
         } else {
             error!("Failed to parse markdown content");

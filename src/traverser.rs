@@ -51,7 +51,7 @@ pub trait MarkdownNodeTraverser {
         }
     }
     /// Process a child node and update the result (override this if needed)
-    fn process_child(&mut self, node: &Node, mut result: Self::Output) -> Self::Output {
+    fn process_child(&mut self, node: &Node, result: Self::Output) -> Self::Output {
         // Default implementation just processes the node and passes along the result
         self.process_node(node, result)
     }
