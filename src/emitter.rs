@@ -3,10 +3,13 @@ use docx_rs::*;
 use log::debug;
 use log::error;
 use log::warn;
+use markdown::mdast;
+use markdown::mdast::Table;
 use markdown::mdast::{Heading, Node};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
+use std::mem;
 use std::path::PathBuf;
 
 use crate::{
@@ -62,6 +65,9 @@ pub struct Emitter {
     em_state: StackCounter,
     list_type: Vec<ListType>,
     image_references: HashMap<String, usize>,
+    table: Vec<docx_rs::TableRow>,
+    table_cells: Vec<docx_rs::TableCell>,
+    paragraph: docx_rs::Paragraph,
 }
 
 impl Emitter {
@@ -409,7 +415,7 @@ impl MarkdownNodeTraverser for Emitter {
         self.add_heading(docx, &text, heading.depth)
     }
 
-    fn visit_image(&mut self, image: &markdown::mdast::Image, docx: Docx) -> Docx {
+    fn visit_image(&mut self, image: &mdast::Image, docx: Docx) -> Docx {
         debug!(
             "Processing image: url={}, alt={}, title={:?}",
             image.url, image.alt, image.title
@@ -438,13 +444,13 @@ impl MarkdownNodeTraverser for Emitter {
         )
     }
 
-    fn visit_text(&mut self, text: &markdown::mdast::Text, docx: Docx) -> Docx {
+    fn visit_text(&mut self, text: &mdast::Text, docx: Docx) -> Docx {
         let textval = self.check_references(&text.value);
         let text_paragraph = docx_rs::Paragraph::new().add_run(self.format_text(&textval));
         docx.add_paragraph(text_paragraph)
     }
 
-    fn visit_strong(&mut self, strong: &markdown::mdast::Strong, mut docx: Docx) -> Docx {
+    fn visit_strong(&mut self, strong: &mdast::Strong, mut docx: Docx) -> Docx {
         self.strong_state.push();
         for node in strong.children.iter() {
             docx = self.process_node(node, docx);
@@ -453,7 +459,7 @@ impl MarkdownNodeTraverser for Emitter {
         docx
     }
 
-    fn visit_emphasis(&mut self, em: &markdown::mdast::Emphasis, mut docx: Docx) -> Docx {
+    fn visit_emphasis(&mut self, em: &mdast::Emphasis, mut docx: Docx) -> Docx {
         self.em_state.push();
         for node in em.children.iter() {
             docx = self.process_node(node, docx);
@@ -462,7 +468,7 @@ impl MarkdownNodeTraverser for Emitter {
         docx
     }
 
-    fn visit_list(&mut self, list: &markdown::mdast::List, mut docx: Docx) -> Docx {
+    fn visit_list(&mut self, list: &mdast::List, mut docx: Docx) -> Docx {
         // Determine list type (ordered/numbered or unordered/bullet)
         if list.ordered {
             self.list_type.push(ListType::Ordered);
@@ -479,7 +485,7 @@ impl MarkdownNodeTraverser for Emitter {
         docx
     }
 
-    fn visit_list_item(&mut self, list_item: &markdown::mdast::ListItem, mut docx: Docx) -> Docx {
+    fn visit_list_item(&mut self, list_item: &mdast::ListItem, mut docx: Docx) -> Docx {
         if list_item.checked.is_some() {
             debug!("Check Boxes not yet supported");
         }
@@ -520,6 +526,51 @@ impl MarkdownNodeTraverser for Emitter {
 
         // Add the list item paragraph to the document
         docx.add_paragraph(paragraph)
+    }
+
+    fn visit_paragraph(&mut self, para: &mdast::Paragraph, mut docx: Self::Output) -> Self::Output {
+        self.paragraph = docx_rs::Paragraph::new();
+        for child in para.children.iter() {
+            docx = self.process_child(child, docx);
+        }
+        docx
+    }
+
+    fn visit_table(&mut self, table: &Table, mut docx: Self::Output) -> Self::Output {
+        self.table.clear();
+        let table_alignment: Vec<AlignmentType> = table
+            .align
+            .iter()
+            .map(|alig| match alig {
+                mdast::AlignKind::None | mdast::AlignKind::Left => AlignmentType::Left,
+                mdast::AlignKind::Right => AlignmentType::Right,
+                mdast::AlignKind::Center => AlignmentType::Center,
+            })
+            .collect();
+        for child in table.children.iter() {
+            docx = self.process_child(child, docx);
+        }
+        docx
+    }
+
+    fn visit_table_row(
+        &mut self,
+        row: &markdown::mdast::TableRow,
+        mut docx: Self::Output,
+    ) -> Self::Output {
+        self.table_cells.clear();
+        for child in row.children.iter() {
+            docx = self.process_child(child, docx);
+        }
+        let cells = mem::take(&mut self.table_cells);
+        self.table.push(docx_rs::TableRow::new(cells));
+        docx
+    }
+
+    fn visit_table_cell(&mut self, _cell: &mdast::TableCell, docx: Self::Output) -> Self::Output {
+        // let paragraph = docx_rs::Paragraph::new();
+        // let cell_paragraph = self.build_paragraph
+        docx
     }
 }
 
