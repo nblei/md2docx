@@ -1,7 +1,6 @@
 use anyhow::Result;
 use docx_rs::*;
 use log::debug;
-use log::error;
 use log::warn;
 use markdown::mdast;
 use markdown::mdast::Table;
@@ -68,6 +67,7 @@ pub struct Emitter {
     table: Vec<docx_rs::TableRow>,
     table_cells: Vec<docx_rs::TableCell>,
     paragraph: docx_rs::Paragraph,
+    paragraph_alignment: Option<AlignmentType>,
 }
 
 impl Emitter {
@@ -216,18 +216,6 @@ impl Emitter {
         docx
     }
 
-    // Format text with bold if needed
-    fn format_text(&self, text: &str) -> Run {
-        let mut run = Run::new().add_text(text);
-        if self.strong_state.into() {
-            run = run.bold();
-        }
-        if self.em_state.into() {
-            run = run.italic();
-        }
-        run
-    }
-
     // Add a formatted heading and return the updated docx
     fn add_heading(&self, docx: Docx, text: &str, level: u8) -> Docx {
         let size = match level {
@@ -365,39 +353,6 @@ impl Emitter {
         }
         result
     }
-
-    // Add inline content to a paragraph
-    fn add_inline_content(
-        &self,
-        mut paragraph: docx_rs::Paragraph,
-        node: &Node,
-    ) -> docx_rs::Paragraph {
-        match node {
-            Node::Text(text) => {
-                let textval = self.check_references(&text.value);
-                paragraph = paragraph.add_run(Run::new().add_text(&textval));
-            }
-            Node::Strong(strong) => {
-                for child in &strong.children {
-                    if let Node::Text(text) = child {
-                        let textval = self.check_references(&text.value);
-                        paragraph = paragraph.add_run(Run::new().add_text(&textval).bold());
-                    }
-                }
-            }
-            Node::Emphasis(emphasis) => {
-                for child in &emphasis.children {
-                    if let Node::Text(text) = child {
-                        let textval = self.check_references(&text.value);
-                        paragraph = paragraph.add_run(Run::new().add_text(&textval).italic());
-                    }
-                }
-            }
-
-            _ => error!("Unsupported node type inside match item"),
-        }
-        paragraph
-    }
 }
 
 impl MarkdownNodeTraverser for Emitter {
@@ -445,9 +400,34 @@ impl MarkdownNodeTraverser for Emitter {
     }
 
     fn visit_text(&mut self, text: &mdast::Text, docx: Docx) -> Docx {
-        let textval = self.check_references(&text.value);
-        let text_paragraph = docx_rs::Paragraph::new().add_run(self.format_text(&textval));
-        docx.add_paragraph(text_paragraph)
+        // Process the text value to ensure proper spacing
+        // First, ensure there's a space between words that were separated by newlines
+        let with_spaces = text.value.replace("\n", " ");
+        
+        // Then normalize any multiple spaces that might have been created
+        let normalized_text = with_spaces.split_whitespace().collect::<Vec<&str>>().join(" ");
+        
+        // Finally check for references
+        let textval = self.check_references(&normalized_text);
+
+        // Create a run with appropriate formatting based on current state
+        let mut run = Run::new().add_text(&textval);
+
+        // Apply bold if in bold state
+        if self.strong_state.set() {
+            run = run.bold();
+        }
+
+        // Apply italic if in italic state
+        if self.em_state.set() {
+            run = run.italic();
+        }
+
+        // Add the formatted run to the current paragraph
+        let paragraph = std::mem::take(&mut self.paragraph);
+        self.paragraph = paragraph.add_run(run);
+
+        docx
     }
 
     fn visit_strong(&mut self, strong: &mdast::Strong, mut docx: Docx) -> Docx {
@@ -503,17 +483,22 @@ impl MarkdownNodeTraverser for Emitter {
             ListType::Unordered => 1, // Bullet list
         };
         let indent_level = self.list_type.len() - 1;
-        let mut paragraph = docx_rs::Paragraph::new().numbering(
+
+        // Create a paragraph with numbering properties
+        self.paragraph = docx_rs::Paragraph::new().numbering(
             NumberingId::new(numbering_id),
             IndentLevel::new(indent_level),
         );
+
         // Process the content of the list item and add to the paragraph
         for child in &list_item.children {
             match child {
                 Node::Paragraph(para) => {
-                    // For paragraph nodes in list items, process their children inline
+                    // For paragraph nodes in list items, process their children directly
+                    // This avoids creating a new paragraph
                     for para_child in &para.children {
-                        paragraph = self.add_inline_content(paragraph, para_child);
+                        // Process each child node which will add runs to self.paragraph
+                        docx = self.process_node(para_child, docx);
                     }
                 }
                 _ => {
@@ -525,20 +510,35 @@ impl MarkdownNodeTraverser for Emitter {
         }
 
         // Add the list item paragraph to the document
-        docx.add_paragraph(paragraph)
+        docx.add_paragraph(mem::take(&mut self.paragraph))
     }
 
     fn visit_paragraph(&mut self, para: &mdast::Paragraph, mut docx: Self::Output) -> Self::Output {
-        self.paragraph = docx_rs::Paragraph::new();
+        // Initialize a new paragraph with proper first line indentation
+        let paragraph = docx_rs::Paragraph::new().indent(Some(720), None, Some(720), None);
+        self.paragraph = paragraph;
+
+        // Reset paragraph alignment
+        self.paragraph_alignment = None;
+
+        // Process all children which will add runs to self.paragraph
         for child in para.children.iter() {
             docx = self.process_child(child, docx);
         }
-        docx
+
+        // Apply paragraph alignment if set
+        if let Some(alignment) = self.paragraph_alignment {
+            let paragraph = std::mem::take(&mut self.paragraph);
+            self.paragraph = paragraph.align(alignment);
+        }
+
+        // Add the complete paragraph to the document
+        docx.add_paragraph(mem::take(&mut self.paragraph))
     }
 
     fn visit_table(&mut self, table: &Table, mut docx: Self::Output) -> Self::Output {
         self.table.clear();
-        let table_alignment: Vec<AlignmentType> = table
+        let _table_alignment: Vec<AlignmentType> = table
             .align
             .iter()
             .map(|alig| match alig {
@@ -582,6 +582,7 @@ fn get_image_dimensions(file_path: &PathBuf) -> Result<(u32, u32)> {
 }
 
 static REF_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r#"\{ref:\s*([^}]*)\s*}"#).unwrap());
+
 fn extract_ref(text: &str) -> Option<&str> {
     REF_REGEX
         .captures(text)
