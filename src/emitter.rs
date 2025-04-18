@@ -65,7 +65,6 @@ pub struct Emitter {
     list_type: Vec<ListType>,
     image_references: HashMap<String, usize>,
     table: Vec<docx_rs::TableRow>,
-    table_cells: Vec<docx_rs::TableCell>,
     paragraph: docx_rs::Paragraph,
     paragraph_alignment: Option<AlignmentType>,
 }
@@ -73,7 +72,7 @@ pub struct Emitter {
 impl Emitter {
     pub fn new(base_path: Option<PathBuf>) -> Self {
         Self {
-            base_path: base_path,
+            base_path,
             ..Default::default()
         }
     }
@@ -403,10 +402,13 @@ impl MarkdownNodeTraverser for Emitter {
         // Process the text value to ensure proper spacing
         // First, ensure there's a space between words that were separated by newlines
         let with_spaces = text.value.replace("\n", " ");
-        
+
         // Then normalize any multiple spaces that might have been created
-        let normalized_text = with_spaces.split_whitespace().collect::<Vec<&str>>().join(" ");
-        
+        let normalized_text = with_spaces
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ");
+
         // Finally check for references
         let textval = self.check_references(&normalized_text);
 
@@ -550,7 +552,7 @@ impl MarkdownNodeTraverser for Emitter {
         for child in table.children.iter() {
             docx = self.process_child(child, docx);
         }
-        docx
+        docx.add_table(docx_rs::Table::new(std::mem::take(&mut self.table)))
     }
 
     fn visit_table_row(
@@ -558,18 +560,31 @@ impl MarkdownNodeTraverser for Emitter {
         row: &markdown::mdast::TableRow,
         mut docx: Self::Output,
     ) -> Self::Output {
-        self.table_cells.clear();
+        self.table.push(docx_rs::TableRow::new(vec![]));
         for child in row.children.iter() {
             docx = self.process_child(child, docx);
         }
-        let cells = mem::take(&mut self.table_cells);
-        self.table.push(docx_rs::TableRow::new(cells));
         docx
     }
 
-    fn visit_table_cell(&mut self, _cell: &mdast::TableCell, docx: Self::Output) -> Self::Output {
-        // let paragraph = docx_rs::Paragraph::new();
-        // let cell_paragraph = self.build_paragraph
+    fn visit_table_cell(
+        &mut self,
+        _cell: &mdast::TableCell,
+        mut docx: Self::Output,
+    ) -> Self::Output {
+        self.paragraph = docx_rs::Paragraph::new();
+        for child in _cell.children.iter() {
+            docx = self.process_node(child, docx);
+        }
+        let tcell = TableCell::new();
+        let tcell = tcell.add_paragraph(std::mem::take(&mut self.paragraph));
+        // let mut table = std::mem::take(&mut self.table);
+        self.table
+            .iter_mut()
+            .last()
+            .unwrap()
+            .cells
+            .push(TableRowChild::TableCell(tcell));
         docx
     }
 }
@@ -588,3 +603,4 @@ fn extract_ref(text: &str) -> Option<&str> {
         .captures(text)
         .and_then(|caps| caps.get(1).map(|m| m.as_str()))
 }
+
