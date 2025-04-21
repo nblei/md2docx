@@ -45,8 +45,8 @@ pub trait MarkdownNodeTraverser {
             Node::MdxFlowExpression(expr) => self.visit_mdx_flow_expression(expr, output),
             Node::Table(table) => self.visit_table(table, output),
             Node::ThematicBreak(break_node) => self.visit_thematic_break(break_node, output),
-            Node::TableRow(row) => self.visit_table_row(row, output),
-            Node::TableCell(cell) => self.visit_table_cell(cell, output),
+            Node::TableRow(row) => self.visit_table_row(row, output, false),
+            Node::TableCell(cell) => self.visit_table_cell(cell, output, false),
             Node::Definition(def) => self.visit_definition(def, output),
         }
     }
@@ -118,15 +118,30 @@ pub trait MarkdownNodeTraverser {
     }
 
     fn visit_table(&mut self, table: &Table, mut output: Self::Output) -> Self::Output {
-        for child in &table.children {
-            output = self.process_child(child, output);
+        for (i, child) in table.children.iter().enumerate() {
+            let last = i == (table.children.len() - 1);
+            if let Node::TableRow(table_row) = child {
+                output = self.visit_table_row(table_row, output, last);
+            } else {
+                output = self.process_child(child, output);
+            }
         }
         output
     }
 
-    fn visit_table_row(&mut self, row: &TableRow, mut output: Self::Output) -> Self::Output {
-        for child in &row.children {
-            output = self.process_child(child, output);
+    fn visit_table_row(
+        &mut self,
+        row: &TableRow,
+        mut output: Self::Output,
+        is_last_row: bool,
+    ) -> Self::Output {
+        for (i, child) in row.children.iter().enumerate() {
+            let last = i == (row.children.len() - 1);
+            if let Node::TableCell(table_cell) = child {
+                output = self.visit_table_cell(table_cell, output, last && is_last_row);
+            } else {
+                output = self.process_child(child, output);
+            }
         }
         output
     }
@@ -256,7 +271,12 @@ pub trait MarkdownNodeTraverser {
         output
     }
 
-    fn visit_table_cell(&mut self, _cell: &TableCell, output: Self::Output) -> Self::Output {
+    fn visit_table_cell(
+        &mut self,
+        _cell: &TableCell,
+        output: Self::Output,
+        _last_cell: bool,
+    ) -> Self::Output {
         output
     }
 

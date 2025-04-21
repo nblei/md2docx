@@ -10,6 +10,7 @@ Here's an arbitrary table in Markdown format:
 | Saturn  | 116,460       | 1,432.0                        | 83              | 29.46                        |
 | Uranus  | 50,724        | 2,867.0                        | 27              | 84.01                        |
 | Neptune | 49,244        | 4,515.0                        | 14              | 164.79                       |
+|         |               |                                |                 | {"ref": "table-label", "caption": "The Planets"} |
 
 This table shows basic information about the eight planets in our solar system,
 including their size, distance from the Sun, number of moons, and how long they

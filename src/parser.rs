@@ -63,11 +63,8 @@ impl Parser {
             self.image_reference_collector.process_node(&ast, ());
             // Initialize numbering for lists
             self.emitter
-                .set_image_refernces(self.image_reference_collector.get_references().clone());
+                .set_reference(std::mem::take(&mut self.image_reference_collector));
             info!("Image reference collector:");
-            for (key, val) in self.image_reference_collector.get_references().iter() {
-                info!("{} -> {}", key, val);
-            }
             docx = self.emitter.initialize_numbering(docx);
 
             // Add title and author information

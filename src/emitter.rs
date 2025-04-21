@@ -1,61 +1,25 @@
 use anyhow::Result;
 use docx_rs::*;
 use log::debug;
+use log::info;
 use log::warn;
 use markdown::mdast;
 use markdown::mdast::Table;
 use markdown::mdast::{Heading, Node};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
 use std::mem;
 use std::path::PathBuf;
 
+use crate::image_reference_collector::ImageReferenceCollector;
+use crate::metadata::ListType;
+use crate::metadata::StackCounter;
 use crate::{
     image_reference_collector::ImageModifiers,
+    metadata::TableMetadata,
     parser::{EMUS_PER_INCH, Metadata, PPI},
     traverser::MarkdownNodeTraverser,
 };
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-struct StackCounter {
-    value_: u32,
-}
-
-impl StackCounter {
-    pub fn new() -> Self {
-        StackCounter { value_: 0 }
-    }
-    pub fn push(&mut self) {
-        self.value_ += 1;
-    }
-    pub fn pop(&mut self) {
-        if self.value_ > 0 {
-            self.value_ -= 1;
-        }
-    }
-    pub fn set(&self) -> bool {
-        self.value_ > 0
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ListType {
-    Ordered,
-    Unordered,
-}
-
-impl From<StackCounter> for bool {
-    fn from(value: StackCounter) -> Self {
-        value.set()
-    }
-}
-
-impl Default for StackCounter {
-    fn default() -> Self {
-        StackCounter::new()
-    }
-}
 
 #[derive(Default, Debug, Clone)]
 pub struct Emitter {
@@ -63,8 +27,9 @@ pub struct Emitter {
     base_path: Option<PathBuf>,
     em_state: StackCounter,
     list_type: Vec<ListType>,
-    image_references: HashMap<String, usize>,
+    reference: ImageReferenceCollector,
     table: Vec<docx_rs::TableRow>,
+    table_caption: Option<String>,
     paragraph: docx_rs::Paragraph,
     paragraph_alignment: Option<AlignmentType>,
 }
@@ -77,9 +42,10 @@ impl Emitter {
         }
     }
 
-    pub fn set_image_refernces(&mut self, image_references: HashMap<String, usize>) {
-        self.image_references = image_references;
+    pub fn set_reference(&mut self, reference: ImageReferenceCollector) {
+        self.reference = reference;
     }
+
     // Handle document metadata (title, author)
     pub fn add_document_metadata(&self, metadata: &Option<Metadata>, mut docx: Docx) -> Docx {
         // Add title and author from metadata if available
@@ -123,7 +89,7 @@ impl Emitter {
         url: &str,
         alt: &str,
         title: Option<&str>,
-        figure_number: usize,
+        figure: &str,
     ) -> Docx {
         let img_url = url.to_string();
         let mut docx = docx;
@@ -150,7 +116,7 @@ impl Emitter {
 
                         // Reference handling is now done in the first pass
                         if let Some(reference) = res.r#ref {
-                            debug!("Using reference: {} -> {}", reference, figure_number);
+                            debug!("Using reference: {} -> {}", reference, figure);
                         } else {
                             debug!("Image has no reference");
                         }
@@ -170,9 +136,9 @@ impl Emitter {
                         // Create a caption text with figure number
                         let display_title = title.unwrap_or(alt);
                         let caption_text = if !display_title.is_empty() {
-                            format!("Figure {}: {}", figure_number, display_title)
+                            format!("Figure {}: {}", figure, display_title)
                         } else {
-                            format!("Figure {}", figure_number)
+                            format!("Figure {}", figure)
                         };
 
                         // Add a centered caption below the image
@@ -323,13 +289,10 @@ impl Emitter {
             let reference_text = reference_match.as_str();
 
             if let Some(reference_key) = extract_ref(reference_text) {
-                if let Some(figure_number) = self.image_references.get(reference_key) {
+                if let Some(r#ref) = self.reference.get(reference_key) {
                     // Replace the {ref:key} with "Figure X"
-                    debug!(
-                        "Replacing reference '{}' with 'Figure {}'",
-                        reference_key, figure_number
-                    );
-                    let replacement = format!("Figure {}", figure_number);
+                    debug!("Replacing reference '{}' with '{}'", reference_key, r#ref);
+                    let replacement = format!("Figure {}", r#ref);
                     result.replace_range(match_range.clone(), &replacement);
 
                     // Adjust the start index for the next search
@@ -379,14 +342,12 @@ impl MarkdownNodeTraverser for Emitter {
         let res: ImageModifiers =
             serde_json::from_str(&image.alt).unwrap_or(ImageModifiers::default());
 
-        let figure_number = if let Some(reference) = &res.r#ref {
+        let figure = if let Some(reference) = &res.r#ref {
             // Use the figure number from the first pass
-            *self.image_references.get(reference).unwrap_or(&0)
+            self.reference.get(reference).unwrap_or(String::from("??"))
         } else {
             // For images without references, use the position in the document
-            let pos = self.image_references.len() + 1;
-            debug!("Image without reference, assigning position: {}", pos);
-            pos
+            String::from("??")
         };
 
         self.handle_image(
@@ -394,7 +355,7 @@ impl MarkdownNodeTraverser for Emitter {
             &image.url,
             &image.alt,
             image.title.as_deref(),
-            figure_number,
+            &figure,
         )
     }
 
@@ -540,6 +501,7 @@ impl MarkdownNodeTraverser for Emitter {
 
     fn visit_table(&mut self, table: &Table, mut docx: Self::Output) -> Self::Output {
         self.table.clear();
+        self.table_caption = None;
         let _table_alignment: Vec<AlignmentType> = table
             .align
             .iter()
@@ -549,8 +511,18 @@ impl MarkdownNodeTraverser for Emitter {
                 mdast::AlignKind::Center => AlignmentType::Center,
             })
             .collect();
-        for child in table.children.iter() {
-            docx = self.process_child(child, docx);
+        for (i, child) in table.children.iter().enumerate() {
+            let last = i == (table.children.len() - 1);
+            if let Node::TableRow(table_row) = child {
+                docx = self.visit_table_row(table_row, docx, last);
+            } else {
+                docx = self.process_child(child, docx);
+            }
+        }
+        if let Some(caption) = &self.table_caption {
+            let para = docx_rs::Paragraph::new();
+            let para = para.add_run(docx_rs::Run::new().add_text(caption));
+            docx = docx.add_paragraph(para);
         }
         docx.add_table(docx_rs::Table::new(std::mem::take(&mut self.table)))
     }
@@ -559,26 +531,49 @@ impl MarkdownNodeTraverser for Emitter {
         &mut self,
         row: &markdown::mdast::TableRow,
         mut docx: Self::Output,
+        is_last_row: bool,
     ) -> Self::Output {
         self.table.push(docx_rs::TableRow::new(vec![]));
-        for child in row.children.iter() {
-            docx = self.process_child(child, docx);
+        for (i, child) in row.children.iter().enumerate() {
+            let last = i == (row.children.len() - 1);
+            if let Node::TableCell(table_cell) = child {
+                docx = self.visit_table_cell(table_cell, docx, last && is_last_row);
+            } else {
+                docx = self.process_child(child, docx);
+            }
+        }
+        // If last row of table contains metadata, remove last row
+        if self.table_caption.is_some() {
+            self.table.pop();
         }
         docx
     }
 
     fn visit_table_cell(
         &mut self,
-        _cell: &mdast::TableCell,
+        cell: &mdast::TableCell,
         mut docx: Self::Output,
+        is_last_cell: bool,
     ) -> Self::Output {
         self.paragraph = docx_rs::Paragraph::new();
-        for child in _cell.children.iter() {
+        if is_last_cell && cell.children.len() == 1 {
+            let child = cell.children.get(0).unwrap();
+            if let Node::Text(text) = child {
+                let metadata: Result<TableMetadata, serde_json::Error> =
+                    serde_json::from_str(&text.value);
+                if let Ok(metadata) = metadata {
+                    info!("Table has caption: {}", metadata.caption);
+                    self.table_caption = Some(metadata.caption);
+                }
+            } else {
+                debug!("Not a Text Node");
+            }
+        }
+        for child in cell.children.iter() {
             docx = self.process_node(child, docx);
         }
         let tcell = TableCell::new();
         let tcell = tcell.add_paragraph(std::mem::take(&mut self.paragraph));
-        // let mut table = std::mem::take(&mut self.table);
         self.table
             .iter_mut()
             .last()

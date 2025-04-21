@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod emitter;
 mod image_reference_collector;
+mod metadata;
 mod parser;
 mod traverser;
 use parser::Parser;
