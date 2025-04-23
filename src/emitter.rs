@@ -29,7 +29,7 @@ pub struct Emitter {
     list_type: Vec<ListType>,
     reference: ImageReferenceCollector,
     table: Vec<docx_rs::TableRow>,
-    table_caption: Option<String>,
+    table_metadata: Option<TableMetadata>,
     paragraph: docx_rs::Paragraph,
     paragraph_alignment: Option<AlignmentType>,
 }
@@ -501,7 +501,7 @@ impl MarkdownNodeTraverser for Emitter {
 
     fn visit_table(&mut self, table: &Table, mut docx: Self::Output) -> Self::Output {
         self.table.clear();
-        self.table_caption = None;
+        self.table_metadata = None;
         let _table_alignment: Vec<AlignmentType> = table
             .align
             .iter()
@@ -519,10 +519,13 @@ impl MarkdownNodeTraverser for Emitter {
                 docx = self.process_child(child, docx);
             }
         }
-        if let Some(caption) = &self.table_caption {
-            let para = docx_rs::Paragraph::new();
-            let para = para.add_run(docx_rs::Run::new().add_text(caption));
-            docx = docx.add_paragraph(para);
+        if let Some(table_metadata) = &self.table_metadata {
+            let caption = table_metadata.to_string(&self.reference);
+            info!("{}", caption);
+            let caption_paragraph = docx_rs::Paragraph::new()
+                .add_run(Run::new().add_text(caption).italic())
+                .align(AlignmentType::Center);
+            docx = docx.add_paragraph(caption_paragraph);
         }
         docx.add_table(docx_rs::Table::new(std::mem::take(&mut self.table)))
     }
@@ -543,7 +546,7 @@ impl MarkdownNodeTraverser for Emitter {
             }
         }
         // If last row of table contains metadata, remove last row
-        if self.table_caption.is_some() {
+        if self.table_metadata.is_some() {
             self.table.pop();
         }
         docx
@@ -563,7 +566,7 @@ impl MarkdownNodeTraverser for Emitter {
                     serde_json::from_str(&text.value);
                 if let Ok(metadata) = metadata {
                     info!("Table has caption: {}", metadata.caption);
-                    self.table_caption = Some(metadata.caption);
+                    self.table_metadata = Some(metadata);
                 }
             } else {
                 debug!("Not a Text Node");
@@ -598,4 +601,3 @@ fn extract_ref(text: &str) -> Option<&str> {
         .captures(text)
         .and_then(|caps| caps.get(1).map(|m| m.as_str()))
 }
-

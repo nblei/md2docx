@@ -52,7 +52,6 @@ impl Parser {
 
         debug!("Parsing markdown content");
         if let Ok(ast) = to_mdast(&self.content, &markdown::ParseOptions::gfm()) {
-            println!("{:?}", ast);
             // Parse markdown to AST
             debug!("Successfully parsed markdown AST");
             trace!("Content: {}", self.content);
